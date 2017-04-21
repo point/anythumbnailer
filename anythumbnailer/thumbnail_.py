@@ -2,7 +2,8 @@
 from __future__ import absolute_import
 
 from io import BytesIO
-import mimetypes
+# import mimetypes
+import magic
 import os
 import re
 import shutil
@@ -15,7 +16,9 @@ __all__ = ['create_thumbnail']
 
 def create_thumbnail(source_filename, dimensions=None, **kwargs):
     assert dimensions is None
-    mime_type, encoding = mimetypes.guess_type(source_filename, strict=False)
+    # mime_type, encoding = mimetypes.guess_type(source_filename, strict=False)
+    mime = magic.Magic(mime=True)
+    mime_type = mime.from_file(source_filename)
     if (mime_type is None) and ('.' in source_filename):
         extension = source_filename.rsplit('.', 1)[-1].lower()
         mime_type = mimetypes_by_extension.get(extension)
@@ -44,8 +47,11 @@ class Thumbnailer(object):
 
 
 class PNMToImage(Thumbnailer):
-    pnm_to_png = '/usr/bin/pnmtopng'
-    pnm_to_jpg = '/usr/bin/pnmtojpeg'
+    pnm_to_png = ((os.path.exists('/usr/bin/pnmtopng') and '/usr/bin/pnmtopng') or
+                  (os.path.exists('/usr/local/bin/pnmtopng') and '/usr/local/bin/pnmtopng'))
+    pnm_to_jpg = ((os.path.exists('/usr/bin/pnmtojpeg') and '/usr/bin/pnmtojpeg') or
+                  (os.path.exists('/usr/local/bin/pnmtojpeg') and '/usr/local/bin/pnmtojpeg'))
+
     executables = (pnm_to_png, pnm_to_jpg)
 
     def pipe_args(self, dimensions=None, output_format='jpg'):
@@ -62,25 +68,28 @@ class PNMToImage(Thumbnailer):
 # pdftoppm 0.12.4 (CentOS 6.5) bails out if the PDF contents are transferred
 # via stdin. pdftoppm 0.24.3 (Fedora 20) works fine though...
 class Poppler(Thumbnailer):
-    pdf_to_ppm = '/usr/bin/pdftoppm'
+    pdf_to_ppm = ((os.path.exists('/usr/bin/pdftoppm') and '/usr/bin/pdftoppm') or
+                  (os.path.exists('/usr/local/bin/pdftoppm') and '/usr/local/bin/pdftoppm'))
     executables = (pdf_to_ppm, ) + PNMToImage.executables
 
-    def _args(self, source_filename=None, dimensions=None, page=1):
+    def _args(self, source_filename=None, output_filename=None, dimensions=None, page=1):
         assert dimensions is None
         command = (
             self.pdf_to_ppm,
-                '-scale-to', str(2048),
+                # '-scale-to', str(2048),
                 '-f', str(page),
                 '-l', str(page),
         )
-        if source_filename is not None:
-            command += (source_filename, )
+        if source_filename is not None and output_filename is not None:
+            command += (source_filename, output_filename)
         return command
 
 
     def thumbnail(self, source_filename_or_fp, dimensions=None, page=1, output_format='jpg'):
         assert dimensions is None
         temp_fp = None
+        pnm_fp = None
+        temp_ppm_tpl_file = None
         try:
             if not hasattr(source_filename_or_fp, 'read'):
                 filename = source_filename_or_fp
@@ -89,15 +98,24 @@ class Poppler(Thumbnailer):
                 temp_fp.write(source_filename_or_fp.read())
                 temp_fp.flush()
                 filename = temp_fp.name
-            pdftoppm_args = self._args(source_filename=filename, dimensions=dimensions, page=page)
-            pnm_fp = run(pdftoppm_args)
-            if pnm_fp is None:
-                return None
+            temp_ppm_tpl_file = tempfile.NamedTemporaryFile(delete=True)
+
+            pdftoppm_args = self._args(source_filename=filename, output_filename=temp_ppm_tpl_file.name,
+                                       dimensions=dimensions, page=page)
+
+            run(pdftoppm_args)
+            pnm_filename = temp_ppm_tpl_file.name + "-000001.ppm"
+            pnm_fp = open(pnm_filename, 'r+')
             pnm_converter_args = PNMToImage().pipe_args(dimensions=dimensions, output_format=output_format)
             return run(pnm_converter_args, input_=pnm_fp)
         finally:
             if temp_fp is not None:
                 temp_fp.close()
+            if temp_ppm_tpl_file is not None:
+                temp_ppm_tpl_file.close()
+            if pnm_fp is not None:
+                pnm_fp.close()
+                os.remove(pnm_filename)
 
 
 class FileOutputThumbnailer(Thumbnailer):
@@ -135,7 +153,8 @@ class FileOutputThumbnailer(Thumbnailer):
 
 
 class Unoconv(FileOutputThumbnailer):
-    executable = '/usr/bin/unoconv'
+    executable = ((os.path.exists('/usr/bin/unoconv') and '/usr/bin/unoconv') or
+                  (os.path.exists('/usr/local/bin/unoconv') and '/usr/local/bin/unoconv'))
     output_pattern = 'document.'
 
     def _args(self, source_filename, output_filename):
@@ -166,19 +185,25 @@ class Unoconv(FileOutputThumbnailer):
 class ImageMagick(FileOutputThumbnailer):
     # some image formats might contain multiple pages and/or layers and
     # ImageMagick will create multiple output files in that case.
-    executable = '/usr/bin/convert'
+    executable = ((os.path.exists('/usr/bin/convert') and '/usr/bin/convert') or
+                  (os.path.exists('/usr/local/bin/convert') and '/usr/local/bin/convert'))
     output_pattern = 'output.'
 
     def _args(self, source_filename, output_filename):
         return (
             self.executable,
+            "-strip",
+            "-limit", "area", "10MB",
+            "-limit", "disk", "100MB",
+            "-thumbnail", "160x160",
             source_filename,
             output_filename,
         )
 
 
 class ffmpeg(FileOutputThumbnailer):
-    executable = '/usr/bin/ffmpeg'
+    executable = ((os.path.exists('/usr/bin/ffmpeg') and '/usr/bin/ffmpeg') or
+                  (os.path.exists('/usr/local/bin/ffmpeg') and '/usr/local/bin/ffmpeg'))
     output_pattern = 'output%02d.'
 
     def _args(self, source_filename, output_filename):
@@ -195,7 +220,8 @@ class ffmpeg(FileOutputThumbnailer):
 
 
 class PS2PDF(Thumbnailer):
-    executable = '/usr/bin/ps2pdf'
+    executable = ((os.path.exists('/usr/bin/ps2pdf') and '/usr/bin/ps2pdf') or
+                  (os.path.exists('/usr/local/bin/ps2pdf') and '/usr/local/bin/ps2pdf'))
 
     def pipe_args(self, dimensions=None):
         assert dimensions is None
