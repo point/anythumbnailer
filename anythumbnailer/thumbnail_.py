@@ -104,7 +104,13 @@ class Poppler(Thumbnailer):
                                        dimensions=dimensions, page=page)
 
             run(pdftoppm_args)
-            pnm_filename = temp_ppm_tpl_file.name + "-000001.ppm"
+            pnm_filename1 = temp_ppm_tpl_file.name + "-000001.ppm"
+            pnm_filename2 = temp_ppm_tpl_file.name + "-1.ppm"
+            if os.path.isfile(pnm_filename1):
+                pnm_filename = pnm_filename1
+            elif os.path.isfile(pnm_filename2):
+                pnm_filename = pnm_filename2
+
             pnm_fp = open(pnm_filename, 'r+')
             pnm_converter_args = PNMToImage().pipe_args(dimensions=dimensions, output_format=output_format)
             return run(pnm_converter_args, input_=pnm_fp)
